@@ -1,5 +1,5 @@
 #! /usr/bin/env python
-import os, time, csv, argparse, subprocess
+import os, time, csv, subprocess, toml
 import paho.mqtt.client as mqtt
 from colorama import Fore, Back, Style
 from influxdb import InfluxDBClient
@@ -17,20 +17,34 @@ class Relay:
   pubPrefix = ""
   logRotateFormat = "%Y%m%d"
   influx_client = None
-  influx_measurement = "mqtt_data"
 
-  def run(self, instr, outstr, keys, influx_config):
-    self.sub = self.clientFromStr(instr, subscribe=True)
-    self.pub = self.clientFromStr(outstr, subscribe=False)
-    for key in keys:
-      self.forwardVars[key] = 0
+  def run(self, config):
+    self.period = config.get('period', self.period)
+    self.lazyPeriod = config.get('lazyPeriod', self.lazyPeriod)
+    self.csvPeriod = config.get('csvPeriod', self.csvPeriod)
+    self.csvdir = config.get('csvdir', self.csvdir)
+    self.lazyKey = config.get('lazyKey', self.lazyKey)
+    self.clientname = config.get('name', self.clientname)
 
+    influx_config = config.get('influxdb')
     if influx_config:
       self.setup_influxdb(influx_config)
 
+    mqtt_config = config.get('mqtt', {})
+    if not mqtt_config:
+      return print(Back.RED + Fore.BLACK + "No MQTT configuration config found!" + Style.RESET_ALL)
+    if not mqtt_config.get('input'):
+      return print(Back.RED + Fore.BLACK + "No MQTT input configuration found!" + Style.RESET_ALL)
+    self.sub = self.clientFromStr(mqtt_config.get('input'), subscribe=True)
+    self.pub = self.clientFromStr(mqtt_config.get('output'), subscribe=False) if mqtt_config.get('output') else None
+    keys = mqtt_config.get('keys', [])
+    if not keys: return print(Back.RED + Fore.BLACK + "No keys to forward!" + Style.RESET_ALL)
+    for key in keys:
+      self.forwardVars[key] = 0
+
     print("using forwardVars", self.forwardVars)
     self.sub.loop_start()
-    self.pub.loop_start()
+    self.pub.loop_start() if self.pub else None
     try:
       time.sleep(2)
       while True:
@@ -51,18 +65,21 @@ class Relay:
       password=config['password'],
       database=config['database']
     )
-    self.influx_measurement = config['measurement']
-    print(Back.GREEN + Fore.BLACK + "Connected to InfluxDB" + Style.RESET_ALL)
+    print(Back.GREEN + Fore.BLACK + "Set InfluxDB connection" + Style.RESET_ALL, self.influx_client)
 
   def runCSVOutputLoop(self):
     try:
       lastChangeover = time.strftime(self.logRotateFormat)
       fname = os.path.join(self.csvdir, time.strftime(self.logRotateFormat) + "_mppt.csv")  # Use csvdir
+      if not os.path.exists(self.csvdir):
+        os.makedirs(self.csvdir)
       didexist = os.path.isfile(fname)
       with open(fname, 'a', newline='') as outfile:
         print(Back.YELLOW + Fore.BLACK + "opening CSV file " + fname + Style.RESET_ALL)
         keys = ['time','unix']
         keys.extend(self.allValues.keys()) #operates in-place it seems
+        keys.extend(self.forwardVars.keys())
+        print("csv keys", keys)
         writer = csv.DictWriter(outfile, delimiter=',', fieldnames=keys)
         if not didexist: writer.writeheader()
         else: print("appending existing csv!")
@@ -71,7 +88,7 @@ class Relay:
           self.recentValues['unix'] = time.time()
           writer.writerow(self.recentValues)
           print(Back.BLUE + Fore.BLACK + time.strftime("%Y%m%dT%H%M%S%Z") + Style.RESET_ALL + " " + str(self.recentValues))
-          self.forward_to_influxdb(self.recentValues)
+          # self.forward_to_influxdb(self.recentValues)
           self.recentValues = {} #clear old ones
           time.sleep(self.csvPeriod)
           if lastChangeover != time.strftime(self.logRotateFormat):
@@ -79,8 +96,8 @@ class Relay:
     finally:
       print("\n" + "closing " + fname)
       outfile.close()
-      subprocess.check_call(['gzip', fname])
-      print("gzipped " + fname)
+      # subprocess.check_call(['gzip', fname])
+      # print("gzipped " + fname)
 
   def forward_to_influxdb(self, data):
     if self.influx_client:
@@ -96,7 +113,7 @@ class Relay:
 
   def stop(self):
     self.sub.loop_stop()
-    self.pub.loop_stop()
+    self.pub.loop_stop() if self.pub else None
 
   def connected(self, client, userdata, flags, rc):
     print(Back.YELLOW + Fore.BLACK + "Connected to broker " + tostr(client) + Style.RESET_ALL)
@@ -114,11 +131,12 @@ class Relay:
         self.sendVar(key, val)
         print(key, val, Back.GREEN + Fore.BLACK + "sent" + Style.RESET_ALL)
         self.forwardVars[key] = time.time()
-      # else: print(key, val, Fore.YELLOW + "HELD" + Style.RESET_ALL)
-    # else: print(key, val, Fore.RED + "muggle" + Style.RESET_ALL)
+    # TODO set timer for next influx publish
+    self.forward_to_influxdb(self.recentValues)
 
   def sendVar(self, key, val):
-     self.pub.publish(self.pubPrefix + key, val)
+     if self.pub:
+       self.pub.publish(self.pubPrefix + key, val)
      return
 
   def clientFromStr(self, s, subscribe):
@@ -126,15 +144,19 @@ class Relay:
     at_split = splitCheck(proto_split[1], '@')
     sub_split = splitCheck(at_split[1], '/', False)
     user_split = splitCheck(at_split[0], ':', False)
-    ret = mqtt.Client(self.clientname)
+    ret = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, self.clientname)
     ret.username_pw_set(user_split[0], user_split[1])
-    ret.on_connect=self.connected
-    ret.on_message=self.msg
+    ret.on_connect = lambda client, userdata, flags, rc: self.connected(client, userdata, flags, rc)
+    ret.on_message = lambda client, userdata, message: self.msg(client, userdata, message)
 
     host_split = splitCheck(sub_split[0], ":", False)
     port = int(host_split[1]) if len(host_split) == 2 else (8883 if proto_split == "mqtts" else 1883)
     if port == 8883: ret.tls_set()
-    ret.connect(host_split[0], port)
+    try:
+      ret.connect(host_split[0], port)
+    except ConnectionRefusedError:
+      print(Back.RED + Fore.BLACK + f"Connection to {host_split[0]}:{port} refused!" + Style.RESET_ALL)
+      exit(1)
     if len(sub_split) > 1:
       if subscribe:
         print("subscribing " + tostr(ret) + " to " + sub_split[1])
@@ -154,44 +176,12 @@ def tostr(client):
 
 def main():
   relay = Relay()
-  parser = argparse.ArgumentParser(description="MQTT-Relay")
-  parser.add_argument('-i','--in', required=True, help="form: mqtt[s]://user:pass@host[:port]/topic/#")
-  parser.add_argument('-o','--out', required=True, help="form: mqtt[s]://user:pass@host[:port]/topicprefix")
-  parser.add_argument('-p','--period', type=int, default=relay.period, help="interval between forwardings")
-  parser.add_argument('-l','--lazyPeriod', type=int, default=relay.lazyPeriod, help="interval when inactive")
-  parser.add_argument('-c','--csvPeriod', type=int, default=relay.csvPeriod, help="csv interval")
-  parser.add_argument('--csvdir', default="./csvs", help="directory to write csv files to")
-  parser.add_argument('--lazyKey', default=relay.lazyKey, help="enable key to come out of lazy-mode")
-  parser.add_argument('--name', default=relay.clientname, help="name to connect to MQTT dbs with")
-  parser.add_argument('-k','--key', nargs='*', type=str, help="keys to forward to output mqtt")
-  parser.add_argument('--keys', type=str, help="keys to forward to mqtt, comma seperated")
-  parser.add_argument('--influx-host', help="InfluxDB host")
-  parser.add_argument('--influx-port', type=int, default=8086, help="InfluxDB port")
-  parser.add_argument('--influx-user', help="InfluxDB username")
-  parser.add_argument('--influx-password', help="InfluxDB password")
-  parser.add_argument('--influx-database', help="InfluxDB database name")
-  parser.add_argument('--influx-measurement', default=relay.influx_measurement, help="InfluxDB measurement name")
-  parser.add_argument('-x', '--extra-sub', nargs='*', type=str, help="extra subscriptions to make / forward to influx")
-  args = parser.parse_args()
+  config_path = "config.toml"
+  if not os.path.exists(config_path):
+    return print(Back.RED + Fore.BLACK + f"Config file {config_path} not found!" + Style.RESET_ALL)
 
-  if args.keys is not None: args.key = args.keys.split(',')
-  relay.period = args.period
-  relay.csvdir = args.csvdir
-  relay.lazyPeriod = args.lazyPeriod
-  relay.clientname = args.name
-
-  influx_config = None
-  if args.influx_host and args.influx_database:
-    influx_config = {
-      'host': args.influx_host,
-      'port': args.influx_port,
-      'user': args.influx_user,
-      'password': args.influx_password,
-      'database': args.influx_database,
-      'measurement': args.influx_measurement
-    }
-
-  relay.run(getattr(args, 'in'), args.out, args.key, influx_config)
+  config = toml.load(config_path)
+  relay.run(config)
 
 if __name__ == '__main__':
   main()
