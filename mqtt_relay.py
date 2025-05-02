@@ -1,5 +1,5 @@
 #! /usr/bin/env python
-import os, sys, time, datetime, csv, argparse, subprocess
+import os, time, csv, argparse, subprocess
 import paho.mqtt.client as mqtt
 from colorama import Fore, Back, Style
 
