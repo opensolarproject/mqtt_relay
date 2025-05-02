@@ -1,17 +1,19 @@
 #! /usr/bin/env python
-import os, sys, time, datetime, csv, argparse, gzip
+import os, sys, time, datetime, csv, argparse, subprocess
 import paho.mqtt.client as mqtt
 from colorama import Fore, Back, Style
 
 class Relay:
   clientname = "relay"
-  forwardVars = dict() #involt,outvolt,outcurr,outpower,wh
+  forwardVars = dict()
   period = 12
   lazyPeriod = 45
+  csvPeriod = 8
   allValues = {}
   recentValues = {}
   lazyKey = "outputEN"
   pubPrefix = ""
+  logRotateFormat = "%Y%m%d"
 
   def run(self, instr, outstr, keys):
     self.sub = self.clientFromStr(instr, subscribe=True)
@@ -33,26 +35,30 @@ class Relay:
 
   def runCSVOutputLoop(self):
     try:
-      lastChangeover = time.strftime("%H")
-      fname = time.strftime("%Y%m%dT%H%M%S%Z") + "_mppt.csv.gz"
-      with gzip.open(fname, 'wt', newline='') as fz:
+      lastChangeover = time.strftime(self.logRotateFormat)
+      fname = time.strftime(self.logRotateFormat) + "_mppt.csv"
+      didexist = os.path.isfile(fname)
+      with open(fname, 'a', newline='') as outfile:
         print(Back.YELLOW + Fore.BLACK + "opening CSV file " + fname + Style.RESET_ALL)
         keys = ['time','unix']
         keys.extend(self.allValues.keys()) #operates in-place it seems
-        writer = csv.DictWriter(fz, delimiter=',', fieldnames=keys)
-        writer.writeheader()
+        writer = csv.DictWriter(outfile, delimiter=',', fieldnames=keys)
+        if not didexist: writer.writeheader()
+        else: print("appending existing csv!")
         while True:
           self.recentValues['time'] = time.strftime("%Y%m%dT%H%M%S%Z")
           self.recentValues['unix'] = time.time()
           writer.writerow(self.recentValues)
           print(Back.BLUE + Fore.BLACK + time.strftime("%Y%m%dT%H%M%S%Z") + Style.RESET_ALL + " " + str(self.recentValues))
           self.recentValues = {} #clear old ones
-          time.sleep(8)
-          if lastChangeover != time.strftime("%H"):
+          time.sleep(self.csvPeriod)
+          if lastChangeover != time.strftime(self.logRotateFormat):
             return
     finally:
       print("\n" + "closing " + fname)
-      fz.close()
+      outfile.close()
+      subprocess.check_call(['gzip', fname])
+      print("gzipped " + fname)
 
   def stop(self):
     self.sub.loop_stop()
@@ -117,10 +123,11 @@ def main():
   parser = argparse.ArgumentParser(description="MQTT-Relay")
   parser.add_argument('-i','--in', required=True, help="form: mqtt[s]://user:pass@host[:port]/topic/#")
   parser.add_argument('-o','--out', required=True, help="form: mqtt[s]://user:pass@host[:port]/topicprefix")
-  parser.add_argument('-p','--period', type=int, default=bb.period, help="interval between forwardings")
-  parser.add_argument('-l','--lazyPeriod', type=int, default=bb.lazyPeriod, help="interval when inactive")
-  parser.add_argument('--lazyKey', default=bb.lazyKey, help="enable key to come out of lazy-mode")
-  parser.add_argument('--name', default=bb.clientname, help="name to connect to MQTT dbs with")
+  parser.add_argument('-p','--period', type=int, default=relay.period, help="interval between forwardings")
+  parser.add_argument('-l','--lazyPeriod', type=int, default=relay.lazyPeriod, help="interval when inactive")
+  parser.add_argument('-c','--csvPeriod', type=int, default=relay.csvPeriod, help="csv interval")
+  parser.add_argument('--lazyKey', default=relay.lazyKey, help="enable key to come out of lazy-mode")
+  parser.add_argument('--name', default=relay.clientname, help="name to connect to MQTT dbs with")
   parser.add_argument('-k','--key', nargs='*', type=str, help="keys to forward")
   parser.add_argument('--keys', type=str, help="keys to forward, comma seperated")
   args = parser.parse_args()
