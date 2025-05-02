@@ -9,6 +9,7 @@ class Relay:
   period = 12
   lazyPeriod = 45
   csvPeriod = 8
+  csvdir = None
   allValues = {}
   recentValues = {}
   lazyKey = "outputEN"
@@ -27,7 +28,10 @@ class Relay:
     try:
       time.sleep(2)
       while True:
-        self.runCSVOutputLoop()
+        if self.csvdir:
+          self.runCSVOutputLoop()
+        else:
+          time.sleep(1)  # Keep the MQTT thread running
     except KeyboardInterrupt:
       print(Back.RED + Fore.BLACK + "now exiting" + Style.RESET_ALL)
 
@@ -36,7 +40,7 @@ class Relay:
   def runCSVOutputLoop(self):
     try:
       lastChangeover = time.strftime(self.logRotateFormat)
-      fname = time.strftime(self.logRotateFormat) + "_mppt.csv"
+      fname = os.path.join(self.csvdir, time.strftime(self.logRotateFormat) + "_mppt.csv")  # Use csvdir
       didexist = os.path.isfile(fname)
       with open(fname, 'a', newline='') as outfile:
         print(Back.YELLOW + Fore.BLACK + "opening CSV file " + fname + Style.RESET_ALL)
@@ -126,6 +130,7 @@ def main():
   parser.add_argument('-p','--period', type=int, default=relay.period, help="interval between forwardings")
   parser.add_argument('-l','--lazyPeriod', type=int, default=relay.lazyPeriod, help="interval when inactive")
   parser.add_argument('-c','--csvPeriod', type=int, default=relay.csvPeriod, help="csv interval")
+  parser.add_argument('--csvdir', help="directory to write csv files to")
   parser.add_argument('--lazyKey', default=relay.lazyKey, help="enable key to come out of lazy-mode")
   parser.add_argument('--name', default=relay.clientname, help="name to connect to MQTT dbs with")
   parser.add_argument('-k','--key', nargs='*', type=str, help="keys to forward")
@@ -134,6 +139,7 @@ def main():
 
   if args.keys is not None: args.key = args.keys.split(',')
   relay.period = args.period
+  relay.csvdir = args.csvdir
   relay.lazyPeriod = args.lazyPeriod
   relay.clientname = args.name
   relay.run(getattr(args, 'in'), args.out, args.key)
