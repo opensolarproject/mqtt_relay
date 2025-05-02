@@ -2,6 +2,7 @@
 import os, time, csv, argparse, subprocess
 import paho.mqtt.client as mqtt
 from colorama import Fore, Back, Style
+from influxdb import InfluxDBClient
 
 class Relay:
   clientname = "relay"
@@ -15,12 +16,17 @@ class Relay:
   lazyKey = "outputEN"
   pubPrefix = ""
   logRotateFormat = "%Y%m%d"
+  influx_client = None
+  influx_measurement = "mqtt_data"
 
-  def run(self, instr, outstr, keys):
+  def run(self, instr, outstr, keys, influx_config):
     self.sub = self.clientFromStr(instr, subscribe=True)
     self.pub = self.clientFromStr(outstr, subscribe=False)
     for key in keys:
       self.forwardVars[key] = 0
+
+    if influx_config:
+      self.setup_influxdb(influx_config)
 
     print("using forwardVars", self.forwardVars)
     self.sub.loop_start()
@@ -36,6 +42,17 @@ class Relay:
       print(Back.RED + Fore.BLACK + "now exiting" + Style.RESET_ALL)
 
     self.stop()
+
+  def setup_influxdb(self, config):
+    self.influx_client = InfluxDBClient(
+      host=config['host'],
+      port=config['port'],
+      username=config['user'],
+      password=config['password'],
+      database=config['database']
+    )
+    self.influx_measurement = config['measurement']
+    print(Back.GREEN + Fore.BLACK + "Connected to InfluxDB" + Style.RESET_ALL)
 
   def runCSVOutputLoop(self):
     try:
@@ -54,6 +71,7 @@ class Relay:
           self.recentValues['unix'] = time.time()
           writer.writerow(self.recentValues)
           print(Back.BLUE + Fore.BLACK + time.strftime("%Y%m%dT%H%M%S%Z") + Style.RESET_ALL + " " + str(self.recentValues))
+          self.forward_to_influxdb(self.recentValues)
           self.recentValues = {} #clear old ones
           time.sleep(self.csvPeriod)
           if lastChangeover != time.strftime(self.logRotateFormat):
@@ -63,6 +81,18 @@ class Relay:
       outfile.close()
       subprocess.check_call(['gzip', fname])
       print("gzipped " + fname)
+
+  def forward_to_influxdb(self, data):
+    if self.influx_client:
+      json_body = [
+        {
+          "measurement": self.influx_measurement,
+          "time": data['time'],
+          "fields": {k: float(v) if v.replace('.', '', 1).isdigit() else v for k, v in data.items() if k not in ['time', 'unix']}
+        }
+      ]
+      self.influx_client.write_points(json_body)
+      print(Back.GREEN + Fore.BLACK + "Forwarded to InfluxDB" + Style.RESET_ALL)
 
   def stop(self):
     self.sub.loop_stop()
@@ -130,11 +160,18 @@ def main():
   parser.add_argument('-p','--period', type=int, default=relay.period, help="interval between forwardings")
   parser.add_argument('-l','--lazyPeriod', type=int, default=relay.lazyPeriod, help="interval when inactive")
   parser.add_argument('-c','--csvPeriod', type=int, default=relay.csvPeriod, help="csv interval")
-  parser.add_argument('--csvdir', help="directory to write csv files to")
+  parser.add_argument('--csvdir', default="./csvs", help="directory to write csv files to")
   parser.add_argument('--lazyKey', default=relay.lazyKey, help="enable key to come out of lazy-mode")
   parser.add_argument('--name', default=relay.clientname, help="name to connect to MQTT dbs with")
-  parser.add_argument('-k','--key', nargs='*', type=str, help="keys to forward")
-  parser.add_argument('--keys', type=str, help="keys to forward, comma seperated")
+  parser.add_argument('-k','--key', nargs='*', type=str, help="keys to forward to output mqtt")
+  parser.add_argument('--keys', type=str, help="keys to forward to mqtt, comma seperated")
+  parser.add_argument('--influx-host', help="InfluxDB host")
+  parser.add_argument('--influx-port', type=int, default=8086, help="InfluxDB port")
+  parser.add_argument('--influx-user', help="InfluxDB username")
+  parser.add_argument('--influx-password', help="InfluxDB password")
+  parser.add_argument('--influx-database', help="InfluxDB database name")
+  parser.add_argument('--influx-measurement', default=relay.influx_measurement, help="InfluxDB measurement name")
+  parser.add_argument('-x', '--extra-sub', nargs='*', type=str, help="extra subscriptions to make / forward to influx")
   args = parser.parse_args()
 
   if args.keys is not None: args.key = args.keys.split(',')
@@ -142,7 +179,19 @@ def main():
   relay.csvdir = args.csvdir
   relay.lazyPeriod = args.lazyPeriod
   relay.clientname = args.name
-  relay.run(getattr(args, 'in'), args.out, args.key)
+
+  influx_config = None
+  if args.influx_host and args.influx_database:
+    influx_config = {
+      'host': args.influx_host,
+      'port': args.influx_port,
+      'user': args.influx_user,
+      'password': args.influx_password,
+      'database': args.influx_database,
+      'measurement': args.influx_measurement
+    }
+
+  relay.run(getattr(args, 'in'), args.out, args.key, influx_config)
 
 if __name__ == '__main__':
   main()

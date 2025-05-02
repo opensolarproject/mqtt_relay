@@ -1,2 +1,4 @@
 paho-mqtt
+influxdb
+requests
 colorama
