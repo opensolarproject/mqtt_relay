@@ -87,6 +87,8 @@ class Relay:
           self.recentValues['time'] = time.strftime("%Y%m%dT%H%M%S%Z")
           self.recentValues['unix'] = time.time()
           writer.writerow(self.recentValues)
+          outfile.flush()
+          os.fsync(outfile.fileno())
           print(Back.BLUE + Fore.BLACK + time.strftime("%Y%m%dT%H%M%S%Z") + Style.RESET_ALL + " " + str(self.recentValues))
           # self.forward_to_influxdb(self.recentValues)
           self.recentValues = {} #clear old ones

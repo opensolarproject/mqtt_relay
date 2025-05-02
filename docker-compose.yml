@@ -1,0 +1,17 @@
+services:
+  mqtt_relay:
+    container_name: mqtt_relay
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - .:/app:ro #everything read-only except all below
+      - ./csvs:/app/csvs
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - mqttnet
+networks:
+  mqttnet:
+    external: true
