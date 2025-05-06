@@ -90,10 +90,14 @@ class Relay:
         while True:
           self.csvValuesCohort['time'] = time.strftime("%Y%m%dT%H%M%S%Z")
           self.csvValuesCohort['unix'] = time.time()
+          for key in list(self.csvValuesCohort.keys()):
+            if key not in keys:
+              print("removing not-included csv key", key)
+              del self.csvValuesCohort[key]
           writer.writerow(self.csvValuesCohort)
           outfile.flush()
           os.fsync(outfile.fileno())
-          print(Back.BLUE + Fore.BLACK + time.strftime("%Y%m%dT%H%M%S%Z") + Style.RESET_ALL + " " + str(self.csvValuesCohort))
+          print(Back.BLUE + Fore.BLACK + time.strftime("%Y%m%dT%H%M%S%Z") + Style.RESET_ALL + " csv write " + str(self.csvValuesCohort))
           # self.forward_to_influxdb(self.csvValuesCohort)
           self.csvValuesCohort = {} #clear old ones
           time.sleep(self.csvPeriod)
