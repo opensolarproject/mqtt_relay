@@ -1,8 +1,8 @@
 #! /usr/bin/env python
-import os, time, csv, subprocess, toml
+import os, time, csv, datetime, subprocess, toml
 import paho.mqtt.client as mqtt
 from colorama import Fore, Back, Style
-from influxdb import InfluxDBClient
+import influxdb_client
 
 class Relay:
   clientname = "relay"
@@ -12,11 +12,14 @@ class Relay:
   csvPeriod = 8
   csvdir = None
   allValues = {}
-  recentValues = {}
+  csvValuesCohort = {}
+  influxValueCohort = {}
+  valuesTimes = {}
   lazyKey = "outputEN"
   pubPrefix = ""
   logRotateFormat = "%Y%m%d"
   influx_client = None
+  influx_bucket = None
 
   def run(self, config):
     self.period = config.get('period', self.period)
@@ -26,10 +29,7 @@ class Relay:
     self.lazyKey = config.get('lazyKey', self.lazyKey)
     self.clientname = config.get('name', self.clientname)
 
-    influx_config = config.get('influxdb')
-    if influx_config:
-      self.setup_influxdb(influx_config)
-
+    ## -- setup mqtt -- ##
     mqtt_config = config.get('mqtt', {})
     if not mqtt_config:
       return print(Back.RED + Fore.BLACK + "No MQTT configuration config found!" + Style.RESET_ALL)
@@ -41,6 +41,17 @@ class Relay:
     if not keys: return print(Back.RED + Fore.BLACK + "No keys to forward!" + Style.RESET_ALL)
     for key in keys:
       self.forwardVars[key] = 0
+
+    ## -- setup influxdb -- ##
+    influx_config = config.get('influxdb')
+    if influx_config:
+      self.influx_client = influxdb_client.InfluxDBClient(
+        url=influx_config['url'],
+        org=influx_config['org'],
+        token=influx_config['token'],
+      )
+      self.influx_bucket = influx_config['bucket']
+      print(Back.GREEN + Fore.BLACK + "Set InfluxDB connection" + Style.RESET_ALL, self.influx_client)
 
     print("using forwardVars", self.forwardVars)
     self.sub.loop_start()
@@ -56,16 +67,6 @@ class Relay:
       print(Back.RED + Fore.BLACK + "now exiting" + Style.RESET_ALL)
 
     self.stop()
-
-  def setup_influxdb(self, config):
-    self.influx_client = InfluxDBClient(
-      host=config['host'],
-      port=config['port'],
-      username=config['user'],
-      password=config['password'],
-      database=config['database']
-    )
-    print(Back.GREEN + Fore.BLACK + "Set InfluxDB connection" + Style.RESET_ALL, self.influx_client)
 
   def runCSVOutputLoop(self):
     try:
@@ -84,14 +85,14 @@ class Relay:
         if not didexist: writer.writeheader()
         else: print("appending existing csv!")
         while True:
-          self.recentValues['time'] = time.strftime("%Y%m%dT%H%M%S%Z")
-          self.recentValues['unix'] = time.time()
-          writer.writerow(self.recentValues)
+          self.csvValuesCohort['time'] = time.strftime("%Y%m%dT%H%M%S%Z")
+          self.csvValuesCohort['unix'] = time.time()
+          writer.writerow(self.csvValuesCohort)
           outfile.flush()
           os.fsync(outfile.fileno())
-          print(Back.BLUE + Fore.BLACK + time.strftime("%Y%m%dT%H%M%S%Z") + Style.RESET_ALL + " " + str(self.recentValues))
-          # self.forward_to_influxdb(self.recentValues)
-          self.recentValues = {} #clear old ones
+          print(Back.BLUE + Fore.BLACK + time.strftime("%Y%m%dT%H%M%S%Z") + Style.RESET_ALL + " " + str(self.csvValuesCohort))
+          # self.forward_to_influxdb(self.csvValuesCohort)
+          self.csvValuesCohort = {} #clear old ones
           time.sleep(self.csvPeriod)
           if lastChangeover != time.strftime(self.logRotateFormat):
             return
@@ -101,17 +102,25 @@ class Relay:
       # subprocess.check_call(['gzip', fname])
       # print("gzipped " + fname)
 
-  def forward_to_influxdb(self, data):
-    if self.influx_client:
-      json_body = [
-        {
-          "measurement": self.influx_measurement,
-          "time": data['time'],
-          "fields": {k: float(v) if v.replace('.', '', 1).isdigit() else v for k, v in data.items() if k not in ['time', 'unix']}
-        }
-      ]
-      self.influx_client.write_points(json_body)
-      print(Back.GREEN + Fore.BLACK + "Forwarded to InfluxDB" + Style.RESET_ALL)
+  def send_influx_cohort(self, measurement="mqtt_data"):
+    if not self.influxValueCohort or not self.influx_client:
+        return #nothing to send
+    ts = max(self.valuesTimes.values(), default=time.time()) # get the latest timestamp
+    ts_iso = datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).isoformat()
+
+    points = []
+    for key, value in self.influxValueCohort.items():
+      try:
+        val = float(value)
+      except ValueError:
+        val = value  # allow non-numeric if needed
+      points.append(influxdb_client.Point(measurement).tag("key", key).field("value", val).time(ts_iso))
+    try:
+      self.influx_client.write_api().write(bucket=self.influx_bucket, record=points)
+      print(Back.GREEN + Fore.BLACK + "Forwarded to InfluxDB:" + Style.RESET_ALL, self.influxValueCohort)
+    except Exception as e:
+      print(Back.RED + Fore.BLACK + "Error sending to InfluxDB: " + str(e) + Style.RESET_ALL)
+    self.influxValueCohort.clear() #Clear the cohorts after sending
 
   def stop(self):
     self.sub.loop_stop()
@@ -127,14 +136,18 @@ class Relay:
     key = message.topic.split("/")[-1]
     val = str(message.payload.decode("utf-8"))
     self.allValues[key] = val
-    self.recentValues[key] = val
+    self.csvValuesCohort[key] = val
+    self.valuesTimes[key] = time.time()
     if key in self.forwardVars:
       if (time.time() - self.forwardVars[key]) > (self.period if self.isEnabled() else self.lazyPeriod):
         self.sendVar(key, val)
         print(key, val, Back.GREEN + Fore.BLACK + "sent" + Style.RESET_ALL)
         self.forwardVars[key] = time.time()
-    # TODO set timer for next influx publish
-    self.forward_to_influxdb(self.recentValues)
+    if self.influx_client:
+      self.influxValueCohort[key] = val
+      if key in self.influxValueCohort: # already in cohort? time to send old values
+        self.send_influx_cohort()
+        # TODO maybe set timer for next influx publish? or use csv loop?
 
   def sendVar(self, key, val):
      if self.pub:

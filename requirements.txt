@@ -1,5 +1,5 @@
 paho-mqtt
-influxdb
+influxdb_client
 requests
 colorama
 toml
