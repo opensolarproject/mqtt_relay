@@ -102,9 +102,9 @@ class Relay:
       # subprocess.check_call(['gzip', fname])
       # print("gzipped " + fname)
 
-  def send_influx_cohort(self, measurement="mqtt_data"):
+  def send_influx_cohort(self):
     if not self.influxValueCohort or not self.influx_client:
-        return #nothing to send
+      return #nothing to send
     ts = max(self.valuesTimes.values(), default=time.time()) # get the latest timestamp
     ts_iso = datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).isoformat()
 
@@ -114,7 +114,7 @@ class Relay:
         val = float(value)
       except ValueError:
         val = value  # allow non-numeric if needed
-      points.append(influxdb_client.Point(measurement).tag("key", key).field("value", val).time(ts_iso))
+      points.append(influxdb_client.Point(key).field("value", val).time(ts_iso))
     try:
       self.influx_client.write_api().write(bucket=self.influx_bucket, record=points)
       print(Back.GREEN + Fore.BLACK + "Forwarded to InfluxDB:" + Style.RESET_ALL, self.influxValueCohort)
