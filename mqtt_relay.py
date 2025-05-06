@@ -7,22 +7,23 @@ import influxdb_client
 class Relay:
   clientname = "relay"
   forwardVars = dict()
-  period = 12
+  mqttFwdMinTime = 8
   lazyPeriod = 45
   csvPeriod = 8
   csvdir = None
   allValues = {}
+  valuesTimes = {}
   csvValuesCohort = {}
   influxValueCohort = {}
-  valuesTimes = {}
   lazyKey = "outputEN"
   pubPrefix = ""
   logRotateFormat = "%Y%m%d"
   influx_client = None
   influx_bucket = None
+  influxFwdMinTime = 2
+  influxFwdLastTx = 0
 
   def run(self, config):
-    self.period = config.get('period', self.period)
     self.lazyPeriod = config.get('lazyPeriod', self.lazyPeriod)
     self.csvPeriod = config.get('csvPeriod', self.csvPeriod)
     self.csvdir = config.get('csvdir', self.csvdir)
@@ -41,6 +42,7 @@ class Relay:
     if not keys: return print(Back.RED + Fore.BLACK + "No keys to forward!" + Style.RESET_ALL)
     for key in keys:
       self.forwardVars[key] = 0
+    self.mqttFwdMinTime = mqtt_config.get('min_interval', self.mqttFwdMinTime)
 
     ## -- setup influxdb -- ##
     influx_config = config.get('influxdb')
@@ -51,6 +53,7 @@ class Relay:
         token=influx_config['token'],
       )
       self.influx_bucket = influx_config['bucket']
+      self.influxFwdMinTime = influx_config.get('min_interval', self.influxFwdMinTime)
       print(Back.GREEN + Fore.BLACK + "Set InfluxDB connection" + Style.RESET_ALL, self.influx_client)
 
     print("using forwardVars", self.forwardVars)
@@ -105,6 +108,8 @@ class Relay:
   def send_influx_cohort(self):
     if not self.influxValueCohort or not self.influx_client:
       return #nothing to send
+    if (time.time() - self.influxFwdLastTx) < self.influxFwdMinTime:
+      return
     ts = max(self.valuesTimes.values(), default=time.time()) # get the latest timestamp
     ts_iso = datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).isoformat()
 
@@ -139,20 +144,20 @@ class Relay:
     self.csvValuesCohort[key] = val
     self.valuesTimes[key] = time.time()
     if key in self.forwardVars:
-      if (time.time() - self.forwardVars[key]) > (self.period if self.isEnabled() else self.lazyPeriod):
+      if (time.time() - self.forwardVars[key]) > (self.mqttFwdMinTime if self.isEnabled() else self.lazyPeriod):
         self.sendVar(key, val)
-        print(key, val, Back.GREEN + Fore.BLACK + "sent" + Style.RESET_ALL)
         self.forwardVars[key] = time.time()
     if self.influx_client:
-      self.influxValueCohort[key] = val
       if key in self.influxValueCohort: # already in cohort? time to send old values
         self.send_influx_cohort()
         # TODO maybe set timer for next influx publish? or use csv loop?
+      self.influxValueCohort[key] = val
 
   def sendVar(self, key, val):
-     if self.pub:
-       self.pub.publish(self.pubPrefix + key, val)
-     return
+    if self.pub:
+      self.pub.publish(self.pubPrefix + key, val)
+      print(key, val, Back.GREEN + Fore.BLACK + "sent" + Style.RESET_ALL)
+    return
 
   def clientFromStr(self, s, subscribe):
     proto_split = splitCheck(s,'://')
