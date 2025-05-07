@@ -125,8 +125,8 @@ class Relay:
         val = value  # allow non-numeric if needed
       points.append(influxdb_client.Point(key).field("value", val).time(ts_iso))
     try:
-      self.influx_client.write_api().write(bucket=self.influx_bucket, record=points)
       print(Back.GREEN + Fore.BLACK + "Forwarded to InfluxDB:" + Style.RESET_ALL, self.influxValueCohort)
+      self.influx_client.write_api(write_options=influxdb_client.client.write_api.SYNCHRONOUS).write(bucket=self.influx_bucket, record=points)
     except Exception as e:
       print(Back.RED + Fore.BLACK + "Error sending to InfluxDB: " + str(e) + Style.RESET_ALL)
     self.influxValueCohort.clear() #Clear the cohorts after sending
