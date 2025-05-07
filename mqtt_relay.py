@@ -132,6 +132,7 @@ class Relay:
     try:
       self.influx_client.write_api(write_options=influxdb_client.client.write_api.SYNCHRONOUS).write(bucket=self.influx_bucket, record=points)
       logme(Back.MAGENTA + Fore.BLACK + f"Influx-Tx {len(self.influxValueCohort)} " + Style.RESET_ALL + " to InfluxDB", self.influxValueCohort)
+      self.influxFwdLastTx = time.time()
     except Exception as e:
       logme(Back.RED + Fore.BLACK + "Error sending to InfluxDB: " + str(e) + Style.RESET_ALL)
     self.influxValueCohort.clear() #Clear the cohorts after sending
