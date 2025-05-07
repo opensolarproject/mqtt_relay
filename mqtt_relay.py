@@ -4,6 +4,11 @@ import paho.mqtt.client as mqtt
 from colorama import Fore, Back, Style
 import influxdb_client, traceback, signal
 
+def logme(*args):
+  timestamp = datetime.datetime.now().strftime('[%Y-%b-%d %H:%M:%S.%f %z]')
+  args = [str(i) for i in args]
+  print(" ".join([timestamp, *args]))
+
 class Relay:
   clientname = "relay"
   forwardVars = dict()
@@ -24,6 +29,7 @@ class Relay:
   influxFwdLastTx = 0
 
   def run(self, config):
+    logme(Back.YELLOW + Fore.BLACK + "Starting MQTT relay" + Style.RESET_ALL)
     self.lazyPeriod = config.get('lazyPeriod', self.lazyPeriod)
     self.csvPeriod = config.get('csvPeriod', self.csvPeriod)
     self.csvdir = config.get('csvdir', self.csvdir)
@@ -33,13 +39,13 @@ class Relay:
     ## -- setup mqtt -- ##
     mqtt_config = config.get('mqtt', {})
     if not mqtt_config:
-      return print(Back.RED + Fore.BLACK + "No MQTT configuration config found!" + Style.RESET_ALL)
+      return logme(Back.RED + Fore.BLACK + "No MQTT configuration config found!" + Style.RESET_ALL)
     if not mqtt_config.get('input'):
-      return print(Back.RED + Fore.BLACK + "No MQTT input configuration found!" + Style.RESET_ALL)
+      return logme(Back.RED + Fore.BLACK + "No MQTT input configuration found!" + Style.RESET_ALL)
     self.sub = self.clientFromStr(mqtt_config.get('input'), subscribe=True)
     self.pub = self.clientFromStr(mqtt_config.get('output'), subscribe=False) if mqtt_config.get('output') else None
     keys = mqtt_config.get('keys', [])
-    if not keys: return print(Back.RED + Fore.BLACK + "No keys to forward!" + Style.RESET_ALL)
+    if not keys: return logme(Back.RED + Fore.BLACK + "No keys to forward!" + Style.RESET_ALL)
     for key in keys:
       self.forwardVars[key] = 0
     self.mqttFwdMinTime = mqtt_config.get('min_interval', self.mqttFwdMinTime)
@@ -54,9 +60,9 @@ class Relay:
       )
       self.influx_bucket = influx_config['bucket']
       self.influxFwdMinTime = influx_config.get('min_interval', self.influxFwdMinTime)
-      print(Back.GREEN + Fore.BLACK + "Set InfluxDB connection" + Style.RESET_ALL, self.influx_client)
+      logme(Back.GREEN + Fore.BLACK + "Set InfluxDB connection" + Style.RESET_ALL, self.influx_client)
 
-    print("using forwardVars", self.forwardVars)
+    logme("using forwardVars", self.forwardVars)
     self.sub.loop_start()
     self.pub.loop_start() if self.pub else None
     try:
@@ -64,10 +70,9 @@ class Relay:
       while True:
         if self.csvdir:
           self.runCSVOutputLoop()
-        else:
-          time.sleep(1)  # Keep the MQTT thread running
+        time.sleep(1)  # Keep the MQTT thread running
     except KeyboardInterrupt:
-      print(Back.RED + Fore.BLACK + "now exiting" + Style.RESET_ALL)
+      logme(Back.RED + Fore.BLACK + "now exiting" + Style.RESET_ALL)
 
     self.stop()
 
@@ -79,32 +84,32 @@ class Relay:
         os.makedirs(self.csvdir)
       didexist = os.path.isfile(fname)
       with open(fname, 'a', newline='') as outfile:
-        print(Back.YELLOW + Fore.BLACK + "opening CSV file " + fname + Style.RESET_ALL)
+        logme(Back.YELLOW + Fore.BLACK + "opening CSV file " + fname + Style.RESET_ALL)
         keys = ['time','unix']
         keys.extend(self.allValues.keys()) #operates in-place it seems
         keys.extend(self.forwardVars.keys())
-        print("csv keys", keys)
+        logme("csv keys", keys)
         writer = csv.DictWriter(outfile, delimiter=',', fieldnames=keys)
         if not didexist: writer.writeheader()
-        else: print("appending existing csv!")
+        else: logme("appending existing csv!")
         while True:
           self.csvValuesCohort['time'] = time.strftime("%Y%m%dT%H%M%S%Z")
           self.csvValuesCohort['unix'] = time.time()
           for key in list(self.csvValuesCohort.keys()):
             if key not in keys:
-              print("removing not-included csv key", key)
+              logme(Fore.BLACK + Back.YELLOW + "removing not-included csv key" + Style.RESET_ALL, key)
               del self.csvValuesCohort[key]
           writer.writerow(self.csvValuesCohort)
           outfile.flush()
           os.fsync(outfile.fileno())
-          print(Back.BLUE + Fore.BLACK + time.strftime("%Y%m%dT%H%M%S%Z") + Style.RESET_ALL + " csv write " + str(self.csvValuesCohort))
+          logme(Back.BLUE + Fore.BLACK + " csv write " + Style.RESET_ALL + str(self.csvValuesCohort))
           # self.forward_to_influxdb(self.csvValuesCohort)
           self.csvValuesCohort = {} #clear old ones
           time.sleep(self.csvPeriod)
           if lastChangeover != time.strftime(self.logRotateFormat):
             return
     finally:
-      print("\n" + "closing " + fname)
+      logme("\n" + "closing " + fname)
       outfile.close()
       # subprocess.check_call(['gzip', fname])
       # print("gzipped " + fname)
@@ -125,10 +130,10 @@ class Relay:
         val = value  # allow non-numeric if needed
       points.append(influxdb_client.Point(key).field("value", val).time(ts_iso))
     try:
-      print(Back.GREEN + Fore.BLACK + "Forwarded to InfluxDB:" + Style.RESET_ALL, self.influxValueCohort)
       self.influx_client.write_api(write_options=influxdb_client.client.write_api.SYNCHRONOUS).write(bucket=self.influx_bucket, record=points)
+      logme(Back.MAGENTA + Fore.BLACK + f"Influx-Tx {len(self.influxValueCohort)} " + Style.RESET_ALL + " to InfluxDB", self.influxValueCohort)
     except Exception as e:
-      print(Back.RED + Fore.BLACK + "Error sending to InfluxDB: " + str(e) + Style.RESET_ALL)
+      logme(Back.RED + Fore.BLACK + "Error sending to InfluxDB: " + str(e) + Style.RESET_ALL)
     self.influxValueCohort.clear() #Clear the cohorts after sending
 
   def stop(self):
@@ -136,31 +141,35 @@ class Relay:
     self.pub.loop_stop() if self.pub else None
 
   def connected(self, client, userdata, flags, rc):
-    print(Back.YELLOW + Fore.BLACK + "Connected to broker " + tostr(client) + Style.RESET_ALL)
+    logme(Back.YELLOW + Fore.BLACK + "Connected to broker " + tostr(client) + Style.RESET_ALL)
 
   def isEnabled(self):
     return (self.allValues[self.lazyKey] != '0') if self.lazyKey in self.allValues else False
 
   def msg(self, client, userdata, message):
-    key = message.topic.split("/")[-1]
-    val = str(message.payload.decode("utf-8"))
-    self.allValues[key] = val
-    self.csvValuesCohort[key] = val
-    self.valuesTimes[key] = time.time()
-    if key in self.forwardVars:
-      if (time.time() - self.forwardVars[key]) > (self.mqttFwdMinTime if self.isEnabled() else self.lazyPeriod):
-        self.sendVar(key, val)
-        self.forwardVars[key] = time.time()
-    if self.influx_client:
-      if key in self.influxValueCohort: # already in cohort? time to send old values
-        self.send_influx_cohort()
-        # TODO maybe set timer for next influx publish? or use csv loop?
-      self.influxValueCohort[key] = val
+    try:
+      key = message.topic.split("/")[-1]
+      val = str(message.payload.decode("utf-8"))
+      self.allValues[key] = val
+      self.csvValuesCohort[key] = val
+      self.valuesTimes[key] = time.time()
+      if key in self.forwardVars:
+        if (time.time() - self.forwardVars[key]) > (self.mqttFwdMinTime if self.isEnabled() else self.lazyPeriod):
+          self.sendVar(key, val)
+          self.forwardVars[key] = time.time()
+      if self.influx_client:
+        if key in self.influxValueCohort: # already in cohort? time to send old values
+          self.send_influx_cohort()
+          # TODO maybe set timer for next influx publish? or use csv loop?
+        self.influxValueCohort[key] = val
+    except Exception as e:
+      logme(Back.RED + Fore.BLACK + "Error in message processing: " + str(e) + Style.RESET_ALL)
+      traceback.print_exc()
 
   def sendVar(self, key, val):
     if self.pub:
       self.pub.publish(self.pubPrefix + key, val)
-      print(key, val, Back.GREEN + Fore.BLACK + "sent" + Style.RESET_ALL)
+      logme(Back.CYAN + Fore.BLACK + "MQTT-Tx" + Style.RESET_ALL, key, val)
     return
 
   def clientFromStr(self, s, subscribe):
@@ -179,11 +188,11 @@ class Relay:
     try:
       ret.connect(host_split[0], port)
     except ConnectionRefusedError:
-      print(Back.RED + Fore.BLACK + f"Connection to {host_split[0]}:{port} refused!" + Style.RESET_ALL)
+      logme(Back.RED + Fore.BLACK + f"Connection to {host_split[0]}:{port} refused!" + Style.RESET_ALL)
       exit(1)
     if len(sub_split) > 1:
       if subscribe:
-        print("subscribing " + tostr(ret) + " to " + sub_split[1])
+        logme("subscribing " + tostr(ret) + " to " + sub_split[1])
         ret.subscribe(sub_split[1])
       else: self.pubPrefix = sub_split[1]
     return ret
