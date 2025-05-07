@@ -9,6 +9,7 @@ services:
       - ./csvs:/app/csvs
     restart: unless-stopped
     stop_signal: SIGINT #faster shutdown
+    stop_grace_period: 3s #faster shutdown
     environment:
       - PYTHONUNBUFFERED=1
     networks:

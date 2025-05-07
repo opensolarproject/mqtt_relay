@@ -1,8 +1,8 @@
 #! /usr/bin/env python
-import os, time, csv, datetime, subprocess, toml
+import os, time, csv, datetime, toml
 import paho.mqtt.client as mqtt
 from colorama import Fore, Back, Style
-import influxdb_client
+import influxdb_client, traceback, signal
 
 class Relay:
   clientname = "relay"
@@ -198,14 +198,17 @@ def tostr(client):
   return str(client._username.decode("utf-8")) + "@" + str(client._host) + ":" + str(client._port)
 
 
-def main():
+if __name__ == '__main__':
   relay = Relay()
   config_path = "config.toml"
   if not os.path.exists(config_path):
-    return print(Back.RED + Fore.BLACK + f"Config file {config_path} not found!" + Style.RESET_ALL)
+    logme(Back.RED + Fore.BLACK + f"Config file {config_path} not found!" + Style.RESET_ALL)
+    exit(1)
+  def handle_sigterm(signum, frame):
+    logme(Back.RED + Fore.BLACK + "SIGTERM received, shutting down..." + Style.RESET_ALL)
+    relay.stop()
+    exit(0)
+  signal.signal(signal.SIGTERM, handle_sigterm)
 
   config = toml.load(config_path)
   relay.run(config)
-
-if __name__ == '__main__':
-  main()
